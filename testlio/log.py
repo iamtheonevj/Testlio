@@ -9,7 +9,6 @@ import traceback
 BASE = 'testlio.automation'
 DIR = './logs'
 
-
 def configure_logger(logger, formatter, handler, level=logging.DEBUG):
     logger.setLevel(level)
     handler.setLevel(level)
@@ -31,21 +30,71 @@ class EventLogger(object):
         logging.StreamHandler())
 
     @classmethod
-    def get_logger(cls, name):
+    def get_logger_testlio(cls, name):
+        # full_path = os.path.join(get_path_to_tests_folder(name), DIR)
         if not os.path.exists(DIR):
             os.makedirs(DIR)
         if not cls.loggers.has_key(name):
+
+            # Calculate the log file name
+            file_name = '.'.join(name.split('.')[1:]) if len(name.split('.')) > 2 else name
+
             cls.loggers[name] = configure_logger(
                 logging.getLogger('{base}.{name}'.format(base=BASE, name=name)),
                 logging.Formatter('%(message)s'),
-                logging.FileHandler('{dir}/{name}.log'.format(dir=DIR, name=name)))
+                logging.FileHandler('{dir}/{name}.log'.format(dir=DIR, name=file_name)))
         return cls.loggers[name]
 
-    def __init__(self, name):
+    @classmethod
+    def get_logger_calabash(cls, name):
+        # full_path = os.path.join(get_path_to_tests_folder(name), DIR)
+        if not os.path.exists(DIR):
+            os.makedirs(DIR)
+        if not cls.loggers.has_key(name):
+
+            cls.loggers[name] = configure_logger(
+                logging.getLogger('{base}.{name}'.format(base=BASE, name=name)),
+                logging.Formatter('\t\t%(message)s'),
+                logging.FileHandler('calabash.log'))
+
+        return cls.loggers[name]
+
+    @classmethod
+    def get_logger_to_drop_page_source(cls, name):
+        # full_path = os.path.join(get_path_to_tests_folder(name), DIR)
+        if not os.path.exists(DIR):
+            os.makedirs(DIR)
+        if not cls.loggers.has_key(name):
+
+            cls.loggers[name] = configure_logger(
+                logging.getLogger('{base}.{name}'.format(base=BASE, name=name)),
+                logging.Formatter('\t\t%(message)s'),
+                logging.FileHandler('console.log'))
+
+        return cls.loggers[name]
+
+    def __init__(self, name, hosting_platform, test_file_dir=None, test_file_name=None):
         super(EventLogger, self).__init__()
-        print name
-        self._logger = EventLogger.get_logger(name)
-        print self._logger
+
+        self.hosting_platform = hosting_platform
+
+        if self.hosting_platform == 'testdroid':
+            ndx = str.index(name, '.')
+            class_name = name[:ndx]
+            script_name = name[ndx+1:]
+
+            main_file_name = 'calabash.log'
+            main_file = open(main_file_name, 'a')
+
+            # Should look like:
+            # Feature: tests.test_script_a.TestClassA
+            main_file.write("\nFeature: %s.%s.%s\n\n" % (test_file_dir, test_file_name, class_name))
+            main_file.write("    Scenario: %s                                             # features/my_first.feature:3\n\n" % script_name)
+
+            self._logger = EventLogger.get_logger_calabash(name)
+            self._source_logger = EventLogger.get_logger_to_drop_page_source('additional_custom_logger')
+        else:
+            self._logger = EventLogger.get_logger_testlio(name)
 
     def start(self, data=None):
         """Log start event"""
@@ -57,10 +106,15 @@ class EventLogger(object):
 
         self._log_info(self._event_data('stop'))
 
-    def click(self, **kwargs):
+    def assertion(self, data=None, **kwargs):
+        """Log assert event"""
+
+        self._log_info(self._event_data('assert', data, **kwargs))
+
+    def click(self, data=None, **kwargs):
         """Log element click event"""
 
-        self._log_info(self._event_data('click', **kwargs))
+        self._log_info(self._event_data('click', data, **kwargs))
 
     def find(self, **kwargs):
         """Log element find event"""
@@ -83,24 +137,28 @@ class EventLogger(object):
 
         self._log_info({'screenshot': path})
 
-    def validate_tcp(self, host, from_timestamp, to_timestamp, uri_contains=None,
-                     body_contains=None, screenshot=None):
+    def validate_tcp(self, host, from_timestamp=None, to_timestamp=None, uri_contains=None,
+                     body_contains=None, screenshot=None, request_present=None):
         """Log TCP validation event for post processing"""
 
         data = {
-            'timestamps': {
-                'from': from_timestamp.isoformat(),
-                'to': to_timestamp.isoformat()
-            },
+            'timestamps': {},
             'tcpdump': {
                 'host': host
             }
         }
 
+        if from_timestamp:
+            data['timestamps']['from'] = from_timestamp.isoformat()
+        if to_timestamp:
+            data['timestamps']['to'] = to_timestamp.isoformat()
         if uri_contains:
             data['tcpdump']['uri_contains'] = uri_contains
         if body_contains:
             data['tcpdump']['body_contains'] = body_contains
+        # validate, that requests are not sent in this timewindow
+        if request_present != None:
+            data['tcpdump']['request_present'] = request_present
 
         self._log_info(self._validation_data(data, screenshot))
 
@@ -160,12 +218,70 @@ class EventLogger(object):
 
         return data
 
+    def _format_dict_data(self, data):
+        out_str = ''
+        out_str += data.get('timestamp') + ' - '
+
+        # screenshot has no event data
+        event_data = data.get('event')
+        if event_data:
+            out_str += event_data.get('type') + ' "'
+
+            element_data = data.get('element')
+            if element_data:
+                out_str += str(element_data) + ' "'
+
+            data_data = data.get('event').get('data')
+            if data_data:
+                out_str += str(data_data) + '"'
+
+        ss_str = data.get('screenshot')
+        if ss_str:
+            ss_str = ss_str.split('/')[-1]
+            out_str += ' - ' + ss_str
+
+        return out_str
+
     def _log_info(self, data):
-        self._log(self._logger.info, data)
+        if self.hosting_platform == 'testdroid':
+            try:
+                data['timestamp'] = datetime.datetime.utcnow().strftime('%H:%M:%S')
+                self._logger.info("Then " + self._format_dict_data(data) + "                                     # features/step_definitions/calabash_steps.rb")
+            except Exception, e:
+                self._logger.info("unhandled case in logger:")
+                self._logger.info(str(e))
+                self._logger.info(str(data))
+            if 'screenshot' in data:
+                self._logger.info('- java -jar /usr/local/rvm/gems/ruby-2.1.2@global/gems/calabash-android-0.5.14/lib/calabash-android/lib/screenshotTaker.jar "04135148006060008790" "%s"' % data['screenshot'])
+        else:
+            data['timestamp'] = datetime.datetime.utcnow().isoformat()
+            self._logger.info(json.dumps(data))
+
+    def _log_to_console_log(self, data):
+        self._source_logger.info(data)
 
     def _log_error(self, data):
-        self._log(self._logger.error, data)
+        if self.hosting_platform == 'testdroid':
+            try:
+                data['timestamp'] = datetime.datetime.utcnow().strftime('%H:%M:%S')
+                self._logger.error("Step unsuccessful: " + self._format_dict_data(data) + "                                     # features/step_definitions/calabash_steps.rb")
+            except Exception, e:
+                self._logger.error("unhandled case in logger:")
+                self._logger.error(str(e))
+                self._logger.error(str(data))
+            if 'screenshot' in data:
+                self._logger.info('- java -jar /usr/local/rvm/gems/ruby-2.1.2@global/gems/calabash-android-0.5.14/lib/calabash-android/lib/screenshotTaker.jar "04135148006060008790" "%s"' % data['screenshot'])
+        else:
+            data['timestamp'] = datetime.datetime.utcnow().isoformat()
+            self._logger.error(json.dumps(data))
 
-    def _log(self, log, data):
-        data['timestamp'] = datetime.datetime.utcnow().isoformat()
-        log(json.dumps(data))
+
+def get_path_to_tests_folder(name):
+    pth = os.path.dirname(os.path.abspath(name))
+
+    count = 0
+    while not pth.endswith("/tests") and count < 10:
+        pth = os.path.abspath(os.path.join(pth, os.path.pardir))
+        count += 1
+
+    return pth
